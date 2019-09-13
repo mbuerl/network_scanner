@@ -3,7 +3,7 @@
 
 import os
 import RPi.GPIO as GPIO
-import socket    
+import socket
 import multiprocessing
 import subprocess
 import struct
@@ -19,14 +19,18 @@ debug=False
 
 # list of machines that need compressors
 #watchlist = []
-watchlist = ['192.168.229.223', '192.168.229.225', '192.168.229.226', '192.168.229.227', '192.168.229.181']
+#watchlist = ['192.168.229.223', '192.168.229.225', '192.168.229.226', '192.168.229.227', '192.168.229.181']
+watchlist = ['192.168.229.225', '192.168.229.226', '192.168.229.227', '192.168.229.181']
+
 # ping intervall time in seconds
 intervall_time_seconds = 120
+
 # minutes to wait before compressors turn off when no watchlist member is running
 compressor_off_delay_minutes = 4
 
+# current relay state
+current_relay_state = False
 
-threading_killflag = False
 s_active_ip_list = list()
 s_active_wachtlist_list = list()
 
@@ -69,7 +73,7 @@ class cPinger:
         s.close()
 #        if debug:
 #            print('  my own ip: ', ip)
-        
+
         return ip
 
 
@@ -119,6 +123,7 @@ class cListHandler:
         if debug:
             print('cListHandler starting')
 
+        self.threading_killflag = False
         self.pinger = cPinger()
         self.rhandler = cRelayHandler()
         self.thread = threading.Thread(name='thread_periodical_checker', target=self.periodical_ckecker)
@@ -126,7 +131,7 @@ class cListHandler:
         self.thread.start()
 
     def terminate(self):
-        threading_killflag = True
+        self.threading_killflag = True
         time.sleep(2.0)
         self.thread.join()
         self.rhandler.terminate()
@@ -140,7 +145,7 @@ class cListHandler:
         if debug:
             print(self.checkcount_to_poweroff, ' ping checks until compressor turnoff')
 
-        while threading_killflag == False:
+        while self.threading_killflag == False:
             try:
                 self.active_ip = self.pinger.map_network()
                 self.get_hostname(self.active_ip)
@@ -158,11 +163,15 @@ class cListHandler:
                 self.rhandler.switch_on()
             else:
                 self.delay_count += 1
-                if self.delay_count <= self.checkcount_to_poweroff: 
+                if self.delay_count <= self.checkcount_to_poweroff:
                     pass
                 else:
                     self.rhandler.switch_off()
-            time.sleep(intervall_time_seconds)
+
+            for _ in range(5):
+                time.sleep(intervall_time_seconds / 5)
+                if self.threading_killflag == True:
+                    break
 
     def get_hostname(self, active_ip):
         #sort active ip list
@@ -182,15 +191,17 @@ class cListHandler:
 #                print('   ip and hostname: ',ip,' ',hostname)
 
             if ip in watchlist:
-                s_active_ip_list.append(str(ip + " " + hostname + " " + "in watchlist"))
-                s_active_wachtlist_list.append(str(ip + " " + hostname))
+                s_active_ip_list.append(str("<tr><td>" + ip + "</td><td>" + hostname + " in watchlist</td></tr>"))
+                s_active_wachtlist_list.append("<tr><td>" + str(ip + "</td><td>" + hostname + "</td></tr>"))
             else:
-                s_active_ip_list.append(str(ip + " " + hostname))
-        
+                s_active_ip_list.append(str("<tr><td>" + ip + "</td><td>" + hostname + "</td></tr>"))
+
 class cRelayHandler:
     def __init__(self):
         if debug:
             print('cRelayHandler starting')
+        global current_relay_state
+
         self.Relay_Ch1 = 26
         self.Relay_Ch2 = 20
         self.Relay_Ch3 = 21
@@ -202,57 +213,85 @@ class cRelayHandler:
         GPIO.setup(self.Relay_Ch2,GPIO.OUT)
         GPIO.setup(self.Relay_Ch3,GPIO.OUT)
 
+        GPIO.output(self.Relay_Ch1,GPIO.HIGH)
+        GPIO.output(self.Relay_Ch2,GPIO.HIGH)
+        GPIO.output(self.Relay_Ch3,GPIO.HIGH)
+
+        current_relay_state = False
+
     def terminate(self):
+        global current_relay_state
+
         if debug:
             print(datetime.now().strftime("%d-%m-%Y %H:%M:%S"),' switch off all relays')
         GPIO.output(self.Relay_Ch1,GPIO.HIGH)
         GPIO.output(self.Relay_Ch2,GPIO.HIGH)
         GPIO.output(self.Relay_Ch3,GPIO.HIGH)
 
+        current_relay_state = False
+
     def switch_on (self):
+        global current_relay_state
+
         if debug:
             print(datetime.now().strftime("%d-%m-%Y %H:%M:%S"),' switch turned on')
         GPIO.output(self.Relay_Ch3,GPIO.LOW)
-    
+
+        current_relay_state = True
+
     def switch_off(self):
+        global current_relay_state
+
         if debug:
             print(datetime.now().strftime("%d-%m-%Y %H:%M:%S"),' switch turned off')
         GPIO.output(self.Relay_Ch3,GPIO.HIGH)
 
+        current_relay_state = False
+
 
 class httpHandler( BaseHTTPRequestHandler ):
+    def __init__(self, request, client_address, server):
+        self.breaksign = "<br>"
+        self.header_message = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><meta name=\"description\" content=\"displays current state of Relay for Aircompressor and status about machines in need for compressed air.\"/><title>Pressure Server</title><style>body{font-family:\"MS Trebuchet\",Verdana,Arial,sans-serif;}tr:nth-child(odd){background:#ddd;}tr:nth-child(even){background:#fff;}td{padding:0px 8px;}</style></head><body>"
+        self.footer_message = "</table></body></html>"
+        self.current_state_message = "<h2>Relay status</h2>"
+        self.watchlist_device_message = "<h2>Active Devices in watchlist:</h2><table><tbody>"
+        self.alldevice_message = "</tbody></table><h2>All active Devices:</h2><table><tbody>"
+        self.no_devices = "<tr><td>No Devices connected!</td></tr>"
+
+        BaseHTTPRequestHandler.__init__(self, request, client_address, server)
+
     def do_GET(self):
-        alldevice_message = "<strong>All active Devices:</strong><br />"
-        watchlist_device_message = "<strong>Active Devices in watchlist:</strong> <br />"
         try:
             self.send_response(200)
             self.send_header( 'Content-type', 'text/html' )
             self.end_headers()
-            #respond active watchlist adresses
-            #wfile.write has to be encoded to utf-8
-            self.wfile.write ( watchlist_device_message.encode() )
+
+            self.wfile.write( self.header_message.encode() )
+
+            # current state of the relay
+            self.wfile.write( self.current_state_message.encode() )
+            if current_relay_state:
+                self.wfile.write( "<p style=\"color:#027a00;font-weight:bold;\">On</p>".encode() )
+            else:
+                self.wfile.write( "<p style=\"color:#c92703;font-weight:bold;\">Off</p>".encode() )
+
+            # respond active watchlist adresses
+            self.wfile.write( self.watchlist_device_message.encode() )
             if len(s_active_wachtlist_list) > 0:
-                breaksign = "<br />"
                 for member in s_active_wachtlist_list:
-                    self.wfile.write(
-                        member.encode() + breaksign.encode()
-                    )
+                    self.wfile.write( member.encode() )
             else:
-                self.message = "No Devices connected!<br />"
-                self.wfile.write( self.message.encode()
-                    )
-            #respond all active ip adresses
-            self.wfile.write ( alldevice_message.encode() )
+                self.wfile.write( self.no_devices.encode() )
+
+            # respond all active ip adresses
+            self.wfile.write( self.alldevice_message.encode() )
             if len(s_active_ip_list) > 0:
-                breaksign = "<br />"
                 for member in s_active_ip_list:
-                    self.wfile.write(
-                        member.encode() + breaksign.encode()
-                    )
+                    self.wfile.write( member.encode() )
             else:
-                self.message = "No Devices connected! <br />"
-                self.wfile.write( self.message.encode()
-                    )
+                self.wfile.write( self.no_devices.encode() )
+            self.wfile.write( self.footer_message.encode() )
         except IOError:
             self.send_error( 404, 'File Not Found: ')
 
@@ -260,7 +299,9 @@ class httpHandler( BaseHTTPRequestHandler ):
 if __name__ == '__main__':
     if debug:
         print('Pressure app starting')
-    time.sleep(10.0)
+        time.sleep(1.0)
+    else:
+        time.sleep(10.0)
 
     listhandler = cListHandler()
 #    listhandler.check_thread_starter()
